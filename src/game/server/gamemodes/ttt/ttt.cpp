@@ -35,6 +35,15 @@ constexpr int BEACON_MAX_ENERGY = 10;
 constexpr int BEACON_RING_RADIUS = 3 * 32;
 constexpr int ENERGY_BEACON_RING_SNAP_ID_BASE = 12000;
 constexpr int ENERGY_BEACON_TRAVEL_SNAP_ID_BASE = 20000;
+constexpr int ENERGY_SHIELD_SNAP_ID_BASE = 24000;
+constexpr int TRAITOR_TESTER_RADIUS = 10 * 32;
+constexpr int TRAITOR_TESTER_MAX_ENERGY = 6;
+constexpr int TRAITOR_TESTER_TEST_COST = 3;
+constexpr int ENERGY_TRAITOR_TESTER_SNAP_ID_BASE = 26000;
+constexpr int ENERGY_TRAITOR_TESTER_TRAVEL_SNAP_ID_BASE = 32000;
+constexpr int ENERGY_LIGHTHOUSE_RING_SNAP_ID_BASE = 36000;
+constexpr int LIGHTHOUSE_LOW_ENERGY_THRESHOLD = 5;
+constexpr int DREADFUL_DAMAGE_INTERVAL_SECONDS = 5;
 bool g_TttWaitingBootstrapHandled = false;
 
 std::string TttNormalizeMapName(const char *pMapName)
@@ -300,6 +309,59 @@ CGameControllerTtt::~CGameControllerTtt() = default;
 void CGameControllerTtt::RefreshTraitorTesterRevealPositions()
 {
 	m_vTraitorTesterRevealPositions.clear();
+	m_vTraitorTesters.clear();
+
+	CCollision *pCollision = GameServer()->Collision();
+	if(!pCollision)
+		return;
+
+	const int Width = pCollision->GetWidth();
+	const int Height = pCollision->GetHeight();
+	if(Width <= 0 || Height <= 0)
+		return;
+
+	std::vector<vec2> vTesterZoneTiles;
+
+	for(int y = 0; y < Height; ++y)
+	{
+		for(int x = 0; x < Width; ++x)
+		{
+			const int MapIndex = y * Width + x;
+			const int TuneValue = pCollision->IsTune(MapIndex);
+			const vec2 Pos(x * 32.0f + 16.0f, y * 32.0f + 16.0f);
+			if(TuneValue == 2)
+				m_vTraitorTesterRevealPositions.push_back(Pos);
+			else if(TuneValue == 4)
+			{
+				STraitorTester Tester;
+				Tester.m_Pos = Pos;
+				Tester.m_EnergyDisplayTopLeft = Pos;
+				Tester.m_Energy = 0;
+				m_vTraitorTesters.push_back(Tester);
+			}
+			else if(TuneValue == 1)
+				vTesterZoneTiles.push_back(Pos);
+		}
+	}
+
+	if(m_vTraitorTesters.empty() && !vTesterZoneTiles.empty())
+	{
+		vec2 AvgPos(0.0f, 0.0f);
+		for(const vec2 &Pos : vTesterZoneTiles)
+			AvgPos += Pos;
+		AvgPos /= (float)vTesterZoneTiles.size();
+
+		STraitorTester Tester;
+		Tester.m_Pos = AvgPos;
+		Tester.m_EnergyDisplayTopLeft = AvgPos;
+		Tester.m_Energy = 0;
+		m_vTraitorTesters.push_back(Tester);
+	}
+}
+
+void CGameControllerTtt::RefreshLighthousePositions()
+{
+	m_vLighthousePositions.clear();
 
 	CCollision *pCollision = GameServer()->Collision();
 	if(!pCollision)
@@ -315,10 +377,10 @@ void CGameControllerTtt::RefreshTraitorTesterRevealPositions()
 		for(int x = 0; x < Width; ++x)
 		{
 			const int MapIndex = y * Width + x;
-			if(pCollision->IsTune(MapIndex) != 2)
+			if(pCollision->IsTune(MapIndex) != 5)
 				continue;
 
-			m_vTraitorTesterRevealPositions.emplace_back(x * 32.0f + 16.0f, y * 32.0f + 16.0f);
+			m_vLighthousePositions.emplace_back(x * 32.0f + 16.0f, y * 32.0f + 16.0f);
 		}
 	}
 }
@@ -349,6 +411,90 @@ void CGameControllerTtt::TriggerTraitorTesterReveal(int ClientId)
 	}
 }
 
+void CGameControllerTtt::TickTraitorTesterEnergy()
+{
+	if(IsOnWaitingMap() || !m_RolesAssigned || m_PostWinGraceActive)
+		return;
+	if(m_vTraitorTesters.empty())
+		return;
+
+	for(size_t i = 0; i < m_vTravelingTraitorTesterEnergies.size();)
+	{
+		const STravelingTraitorTesterEnergy &Travel = m_vTravelingTraitorTesterEnergies[i];
+		if(Server()->Tick() < Travel.m_EndTick)
+		{
+			i++;
+			continue;
+		}
+
+		if(Travel.m_TraitorTesterIndex >= 0 && Travel.m_TraitorTesterIndex < (int)m_vTraitorTesters.size())
+		{
+			STraitorTester &Tester = m_vTraitorTesters[Travel.m_TraitorTesterIndex];
+			if(Tester.m_Energy < TRAITOR_TESTER_MAX_ENERGY)
+				Tester.m_Energy++;
+		}
+
+		m_vTravelingTraitorTesterEnergies.erase(m_vTravelingTraitorTesterEnergies.begin() + i);
+	}
+
+	if(Server()->Tick() % Server()->TickSpeed() != 0)
+		return;
+
+	const int CurrentSecond = Server()->Tick() / Server()->TickSpeed();
+	for(CPlayer *pPlayer : GameServer()->m_apPlayers)
+	{
+		if(!pPlayer)
+			continue;
+
+		const int ClientId = pPlayer->GetCid();
+		if(!Server()->ClientIngame(ClientId))
+			continue;
+		if(pPlayer->GetTeam() == TEAM_SPECTATORS)
+			continue;
+		if(m_aPlayerEnergy[ClientId] <= 0)
+			continue;
+		if(m_aLastTraitorTesterDepositSecond[ClientId] == CurrentSecond)
+			continue;
+
+		CCharacter *pChr = pPlayer->GetCharacter();
+		if(!pChr || !pChr->IsAlive())
+			continue;
+
+		const vec2 PlayerPos = pChr->GetPos();
+		int ClosestTesterIndex = -1;
+		float ClosestDistance = 0.0f;
+		for(int TesterIndex = 0; TesterIndex < (int)m_vTraitorTesters.size(); TesterIndex++)
+		{
+			const STraitorTester &Tester = m_vTraitorTesters[TesterIndex];
+			if(Tester.m_Energy >= TRAITOR_TESTER_MAX_ENERGY)
+				continue;
+
+			const float Distance = distance(PlayerPos, Tester.m_Pos);
+			if(Distance > (float)TRAITOR_TESTER_RADIUS)
+				continue;
+			if(ClosestTesterIndex == -1 || Distance < ClosestDistance)
+			{
+				ClosestTesterIndex = TesterIndex;
+				ClosestDistance = Distance;
+			}
+		}
+
+		if(ClosestTesterIndex == -1)
+			continue;
+
+		m_aPlayerEnergy[ClientId]--;
+		m_aLastTraitorTesterDepositSecond[ClientId] = CurrentSecond;
+
+		STravelingTraitorTesterEnergy Travel;
+		Travel.m_StartPos = PlayerPos;
+		Travel.m_TargetPos = m_vTraitorTesters[ClosestTesterIndex].m_Pos;
+		Travel.m_TraitorTesterIndex = ClosestTesterIndex;
+		Travel.m_StartTick = Server()->Tick();
+		Travel.m_EndTick = Server()->Tick() + Server()->TickSpeed();
+		m_vTravelingTraitorTesterEnergies.push_back(Travel);
+	}
+}
+
 void CGameControllerTtt::TickTraitorTester()
 {
 	if(IsOnWaitingMap() || !m_RolesAssigned)
@@ -360,6 +506,7 @@ void CGameControllerTtt::TickTraitorTester()
 	}
 
 	int CandidateClientId = -1;
+	const CCharacter *pCandidateChr = nullptr;
 	for(const CPlayer *pPlayer : GameServer()->m_apPlayers)
 	{
 		if(!pPlayer)
@@ -383,6 +530,7 @@ void CGameControllerTtt::TickTraitorTester()
 		}
 
 		CandidateClientId = pPlayer->GetCid();
+		pCandidateChr = pChr;
 	}
 
 	if(CandidateClientId == -1)
@@ -414,6 +562,36 @@ void CGameControllerTtt::TickTraitorTester()
 	if(Server()->Tick() - m_TraitorTesterStartTick < NeededTicks)
 		return;
 
+	int TesterIndex = -1;
+	if(pCandidateChr)
+	{
+		const vec2 CandidatePos = pCandidateChr->GetPos();
+		float ClosestDistance = 0.0f;
+		for(int i = 0; i < (int)m_vTraitorTesters.size(); i++)
+		{
+			const float Distance = distance(CandidatePos, m_vTraitorTesters[i].m_Pos);
+			if(Distance > (float)TRAITOR_TESTER_RADIUS)
+				continue;
+			if(TesterIndex == -1 || Distance < ClosestDistance)
+			{
+				TesterIndex = i;
+				ClosestDistance = Distance;
+			}
+		}
+	}
+
+	if(TesterIndex == -1)
+		return;
+
+	if(m_vTraitorTesters[TesterIndex].m_Energy < TRAITOR_TESTER_TEST_COST)
+	{
+		if(Server()->Tick() % Server()->TickSpeed() == 0)
+			SendChatTarget(CandidateClientId, "Traitor tester needs 3 energy.");
+		return;
+	}
+
+	m_vTraitorTesters[TesterIndex].m_Energy -= TRAITOR_TESTER_TEST_COST;
+
 	TriggerTraitorTesterReveal(CandidateClientId);
 	m_TraitorTesterResolved = true;
 }
@@ -437,16 +615,30 @@ void CGameControllerTtt::ResetEnergyState()
 	m_DebugEnergyNodesGameLayer = 0;
 	m_DebugEnergyNodesFrontLayer = 0;
 	m_DebugEnergyNodesSwitchLayer = 0;
+	m_DebugShieldSpawnAnnounced = false;
 	m_aPlayerEnergy.fill(0);
+	m_aLastBroadcastedEnergy.fill(-1);
 	m_aLastBeaconDepositSecond.fill(-1);
+	m_aLastTraitorTesterDepositSecond.fill(-1);
 	m_LastBeaconDecaySecond = -1;
+	m_LighthouseLowEnergyAnnounced = false;
+	m_DreadfulMode = false;
+	m_LastDreadDamageSecond = -1;
 	m_vTravelingBeaconEnergies.clear();
+	m_vTravelingTraitorTesterEnergies.clear();
 	for(auto &Beacon : m_vBeacons)
+	{
 		Beacon.m_Energy = 0;
+		Beacon.m_Broken = false;
+	}
+	for(auto &Tester : m_vTraitorTesters)
+		Tester.m_Energy = 0;
 	for(auto &Trail : m_aPlayerEnergyTrail)
 		Trail.clear();
 	for(auto &Tile : m_vEnergySpawnTiles)
 		Tile.m_HasEnergy = false;
+	for(auto &Tile : m_vShieldSpawnTiles)
+		Tile.m_HasShield = false;
 }
 
 void CGameControllerTtt::RefreshBeaconPositions()
@@ -474,7 +666,30 @@ void CGameControllerTtt::RefreshBeaconPositions()
 			Beacon.m_MapIndex = MapIndex;
 			Beacon.m_Pos = vec2(x * 32.0f + 16.0f, y * 32.0f + 16.0f);
 			Beacon.m_Energy = 0;
+			Beacon.m_Broken = false;
 			m_vBeacons.push_back(Beacon);
+		}
+	}
+}
+
+void CGameControllerTtt::TickBrokenBeaconEffects()
+{
+	if(Server()->Tick() % Server()->TickSpeed() != 0)
+		return;
+
+	for(const SBeacon &Beacon : m_vBeacons)
+	{
+		if(!Beacon.m_Broken)
+			continue;
+
+		for(int i = 0; i < 3; i++)
+		{
+			const float tAngle = (float)secure_rand_below(10000u) / 10000.0f;
+			const float tRadius = (float)secure_rand_below(10000u) / 10000.0f;
+			const float Angle = 2.0f * pi * tAngle;
+			const float Radius = (float)BEACON_RADIUS * std::sqrt(tRadius);
+			const vec2 Pos = Beacon.m_Pos + vec2(std::cos(Angle), std::sin(Angle)) * Radius;
+			GameServer()->CreatePlayerSpawn(Pos);
 		}
 	}
 }
@@ -498,23 +713,40 @@ void CGameControllerTtt::TickBeacons()
 		if(Travel.m_BeaconIndex >= 0 && Travel.m_BeaconIndex < (int)m_vBeacons.size())
 		{
 			SBeacon &Beacon = m_vBeacons[Travel.m_BeaconIndex];
-			if(Beacon.m_Energy < BEACON_MAX_ENERGY)
+			if(!Beacon.m_Broken && Beacon.m_Energy < BEACON_MAX_ENERGY)
 				Beacon.m_Energy++;
 		}
 
 		m_vTravelingBeaconEnergies.erase(m_vTravelingBeaconEnergies.begin() + i);
 	}
 
+	for(SBeacon &Beacon : m_vBeacons)
+	{
+		if(!Beacon.m_Broken && Beacon.m_Energy <= 0)
+			Beacon.m_Broken = true;
+	}
+
 	if(Server()->Tick() % Server()->TickSpeed() != 0)
 		return;
 
 	const int CurrentSecond = Server()->Tick() / Server()->TickSpeed();
-	if(CurrentSecond % 30 == 0 && CurrentSecond != m_LastBeaconDecaySecond)
+	if(m_GracePeriodEndTick != -1 && Server()->Tick() >= m_GracePeriodEndTick && CurrentSecond % 30 == 0 && CurrentSecond != m_LastBeaconDecaySecond)
 	{
 		for(SBeacon &Beacon : m_vBeacons)
+		{
+			if(Beacon.m_Broken)
+				continue;
 			Beacon.m_Energy = maximum(0, Beacon.m_Energy - 1);
+			if(Beacon.m_Energy <= 0)
+				Beacon.m_Broken = true;
+		}
 		m_LastBeaconDecaySecond = CurrentSecond;
 	}
+
+	TickBrokenBeaconEffects();
+
+	if(m_DreadfulMode)
+		return;
 
 	for(CPlayer *pPlayer : GameServer()->m_apPlayers)
 	{
@@ -541,6 +773,8 @@ void CGameControllerTtt::TickBeacons()
 		for(int BeaconIndex = 0; BeaconIndex < (int)m_vBeacons.size(); BeaconIndex++)
 		{
 			const SBeacon &Beacon = m_vBeacons[BeaconIndex];
+			if(Beacon.m_Broken)
+				continue;
 			if(Beacon.m_Energy >= BEACON_MAX_ENERGY)
 				continue;
 
@@ -567,6 +801,112 @@ void CGameControllerTtt::TickBeacons()
 		Travel.m_StartTick = Server()->Tick();
 		Travel.m_EndTick = Server()->Tick() + Server()->TickSpeed();
 		m_vTravelingBeaconEnergies.push_back(Travel);
+	}
+}
+
+void CGameControllerTtt::TickLighthouse()
+{
+	if(IsOnWaitingMap() || !m_RolesAssigned || m_PostWinGraceActive)
+		return;
+
+	int TotalBeaconEnergy = 0;
+	for(const SBeacon &Beacon : m_vBeacons)
+		TotalBeaconEnergy += maximum(0, Beacon.m_Energy);
+
+	if(!m_LighthouseLowEnergyAnnounced && TotalBeaconEnergy == LIGHTHOUSE_LOW_ENERGY_THRESHOLD)
+	{
+		SendChat(-1, TEAM_ALL, "Lighthouse at low energy levels!");
+		m_LighthouseLowEnergyAnnounced = true;
+	}
+
+	if(!m_DreadfulMode && TotalBeaconEnergy <= 0)
+	{
+		m_DreadfulMode = true;
+		m_LastDreadDamageSecond = -1;
+		for(SBeacon &Beacon : m_vBeacons)
+			Beacon.m_Broken = true;
+		SendChat(-1, TEAM_ALL, "The lighthouse has faded. Dread has begun.");
+	}
+
+	if(!m_DreadfulMode)
+		return;
+	if(Server()->Tick() % Server()->TickSpeed() != 0)
+		return;
+
+	const int CurrentSecond = Server()->Tick() / Server()->TickSpeed();
+	if(m_LastDreadDamageSecond != -1 && CurrentSecond - m_LastDreadDamageSecond < DREADFUL_DAMAGE_INTERVAL_SECONDS)
+		return;
+	m_LastDreadDamageSecond = CurrentSecond;
+
+	for(CPlayer *pPlayer : GameServer()->m_apPlayers)
+	{
+		if(!pPlayer)
+			continue;
+		const int ClientId = pPlayer->GetCid();
+		if(!Server()->ClientIngame(ClientId))
+			continue;
+		if(pPlayer->GetTeam() == TEAM_SPECTATORS)
+			continue;
+		if(m_aRoles[ClientId] == ERole::TERRORIST)
+			continue;
+
+		CCharacter *pChr = pPlayer->GetCharacter();
+		if(!pChr || !pChr->IsAlive())
+			continue;
+
+		GameServer()->CreateDamageInd(pChr->GetPos(), 0.0f, 1);
+		pChr->AddHealth(-1);
+		if(pChr->Health() <= 0)
+			pChr->Die(ClientId, WEAPON_GAME);
+	}
+}
+
+void CGameControllerTtt::RebuildShieldSpawnTilesFromMap()
+{
+	m_vShieldSpawnTiles.clear();
+	m_ShieldSpawnTileByMapIndex.clear();
+
+	CCollision *pCollision = GameServer()->Collision();
+	if(!pCollision)
+		return;
+
+	const int Width = pCollision->GetWidth();
+	const int Height = pCollision->GetHeight();
+	if(Width <= 0 || Height <= 0)
+		return;
+
+	const CTile *pGame = pCollision->GameLayer();
+	const CTile *pFront = pCollision->FrontLayer();
+	const CSwitchTile *pSwitch = pCollision->SwitchLayer();
+
+	const unsigned char ShieldIndex = ENTITY_OFFSET + ENTITY_ARMOR_1;
+	for(int y = 0; y < Height; y++)
+	{
+		for(int x = 0; x < Width; x++)
+		{
+			const int MapIndex = y * Width + x;
+			bool IsShieldNode = false;
+
+			if(pGame && pGame[MapIndex].m_Index == ShieldIndex)
+				IsShieldNode = true;
+			if(pFront && pFront[MapIndex].m_Index == ShieldIndex)
+				IsShieldNode = true;
+			if(pSwitch && pSwitch[MapIndex].m_Type == ShieldIndex)
+				IsShieldNode = true;
+
+			if(!IsShieldNode)
+				continue;
+
+			if(m_ShieldSpawnTileByMapIndex.find(MapIndex) != m_ShieldSpawnTileByMapIndex.end())
+				continue;
+
+			SShieldSpawnTile Tile;
+			Tile.m_MapIndex = MapIndex;
+			Tile.m_Pos = vec2(x * 32.0f + 16.0f, y * 32.0f + 16.0f);
+			Tile.m_HasShield = false;
+			m_ShieldSpawnTileByMapIndex[MapIndex] = (int)m_vShieldSpawnTiles.size();
+			m_vShieldSpawnTiles.push_back(Tile);
+		}
 	}
 }
 
@@ -698,34 +1038,95 @@ void CGameControllerTtt::TickEnergyPickups()
 	}
 }
 
-void CGameControllerTtt::TickEnergyTrails()
+void CGameControllerTtt::TickShieldSpawns()
 {
-	for(int ClientId = 0; ClientId < MAX_CLIENTS; ClientId++)
-	{
-		if(m_aPlayerEnergy[ClientId] <= 0)
-		{
-			m_aPlayerEnergyTrail[ClientId].clear();
-			continue;
-		}
+	if(IsOnWaitingMap() || !m_RolesAssigned || m_PostWinGraceActive)
+		return;
+	if(Server()->Tick() % Server()->TickSpeed() != 0)
+		return;
 
-		CPlayer *pPlayer = GameServer()->m_apPlayers[ClientId];
-		if(!pPlayer || !Server()->ClientIngame(ClientId) || pPlayer->GetTeam() == TEAM_SPECTATORS)
-		{
-			m_aPlayerEnergyTrail[ClientId].clear();
+	const int SpawnChance = g_Config.m_SvShieldSpawnChance;
+	for(auto &Tile : m_vShieldSpawnTiles)
+	{
+		if(Tile.m_HasShield)
 			continue;
+
+		if((int)secure_rand_below(100u) < SpawnChance)
+		{
+			Tile.m_HasShield = true;
+			if(!m_DebugShieldSpawnAnnounced)
+			{
+				GameServer()->SendChat(-1, TEAM_ALL, "TTT shield spawned");
+				m_DebugShieldSpawnAnnounced = true;
+			}
 		}
+	}
+}
+
+void CGameControllerTtt::TickShieldPickups()
+{
+	if(IsOnWaitingMap() || !m_RolesAssigned || m_PostWinGraceActive)
+		return;
+
+	for(CPlayer *pPlayer : GameServer()->m_apPlayers)
+	{
+		if(!pPlayer)
+			continue;
+		const int ClientId = pPlayer->GetCid();
+		if(!Server()->ClientIngame(ClientId))
+			continue;
+		if(pPlayer->GetTeam() == TEAM_SPECTATORS)
+			continue;
 
 		CCharacter *pChr = pPlayer->GetCharacter();
 		if(!pChr || !pChr->IsAlive())
+			continue;
+
+		const int MapIndex = GameServer()->Collision()->GetPureMapIndex(pChr->GetPos());
+		auto It = m_ShieldSpawnTileByMapIndex.find(MapIndex);
+		if(It == m_ShieldSpawnTileByMapIndex.end())
+			continue;
+
+		SShieldSpawnTile &Tile = m_vShieldSpawnTiles[It->second];
+		if(!Tile.m_HasShield)
+			continue;
+
+		if(pChr->IncreaseArmor(1))
 		{
-			m_aPlayerEnergyTrail[ClientId].clear();
+			Tile.m_HasShield = false;
+			GameServer()->CreateSound(pChr->GetPos(), SOUND_PICKUP_ARMOR, pChr->TeamMask());
+			GameServer()->SendChatTarget(ClientId, "+1 shield");
+		}
+	}
+}
+
+void CGameControllerTtt::TickEnergyTrails()
+{
+	if(IsOnWaitingMap() || !m_RolesAssigned || m_PostWinGraceActive)
+	{
+		m_aLastBroadcastedEnergy.fill(-1);
+		return;
+	}
+
+	for(int ClientId = 0; ClientId < MAX_CLIENTS; ClientId++)
+	{
+		CPlayer *pPlayer = GameServer()->m_apPlayers[ClientId];
+		if(!pPlayer || !Server()->ClientIngame(ClientId) || pPlayer->GetTeam() == TEAM_SPECTATORS)
+		{
+			m_aLastBroadcastedEnergy[ClientId] = -1;
 			continue;
 		}
 
-		auto &Trail = m_aPlayerEnergyTrail[ClientId];
-		Trail.push_front(pChr->GetPos());
-		if((int)Trail.size() > ENERGY_TRAIL_MAX_HISTORY)
-			Trail.pop_back();
+		const int Energy = minimum(ENERGY_MAX_PER_PLAYER, m_aPlayerEnergy[ClientId]);
+		if(m_aLastBroadcastedEnergy[ClientId] == Energy && Server()->Tick() % Server()->TickSpeed() != 0)
+		{
+			continue;
+		}
+
+		char aBuf[48];
+		str_format(aBuf, sizeof(aBuf), "Energy: %d/%d", Energy, ENERGY_MAX_PER_PLAYER);
+		GameServer()->SendBroadcast(aBuf, ClientId);
+		m_aLastBroadcastedEnergy[ClientId] = Energy;
 	}
 }
 
@@ -749,23 +1150,13 @@ void CGameControllerTtt::SnapEnergy(int SnappingClient)
 		SnapSquare(ENERGY_TILE_SNAP_ID_BASE + (int)i * 4, Tile.m_Pos);
 	}
 
-	for(int ClientId = 0; ClientId < MAX_CLIENTS; ClientId++)
+	for(size_t i = 0; i < m_vShieldSpawnTiles.size(); i++)
 	{
-		const int EnergyCount = minimum(ENERGY_MAX_PER_PLAYER, m_aPlayerEnergy[ClientId]);
-		if(EnergyCount <= 0)
+		const SShieldSpawnTile &Tile = m_vShieldSpawnTiles[i];
+		if(!Tile.m_HasShield)
 			continue;
 
-		const auto &Trail = m_aPlayerEnergyTrail[ClientId];
-		if(Trail.empty())
-			continue;
-
-		for(int Segment = 0; Segment < EnergyCount; Segment++)
-		{
-			const int TrailIndex = minimum((int)Trail.size() - 1, (Segment + 1) * ENERGY_TRAIL_SPACING_TICKS);
-			const vec2 Pos = Trail[TrailIndex];
-			const int SnapId = ENERGY_TRAIL_SNAP_ID_BASE + (ClientId * ENERGY_MAX_PER_PLAYER + Segment) * 4;
-			SnapSquare(SnapId, Pos);
-		}
+		GameServer()->SnapPickup(Context, ENERGY_SHIELD_SNAP_ID_BASE + (int)i, Tile.m_Pos, POWERUP_ARMOR, 0, 0, 0);
 	}
 }
 
@@ -784,6 +1175,9 @@ void CGameControllerTtt::SnapBeacons(int SnappingClient)
 	{
 		const SBeacon &Beacon = m_vBeacons[BeaconIndex];
 		const int BeaconEnergy = minimum(BEACON_MAX_ENERGY, Beacon.m_Energy);
+		if(BeaconEnergy <= 0)
+			continue;
+
 		for(int i = 0; i < BeaconEnergy; i++)
 		{
 			const float Angle = (2.0f * pi * (float)i) / (float)BeaconEnergy;
@@ -803,6 +1197,80 @@ void CGameControllerTtt::SnapBeacons(int SnappingClient)
 		const vec2 Pos = mix(Travel.m_StartPos, Travel.m_TargetPos, t);
 		const int SnapId = ENERGY_BEACON_TRAVEL_SNAP_ID_BASE + (int)i * 4;
 		SnapSquare(SnapId, Pos);
+	}
+}
+
+void CGameControllerTtt::SnapTraitorTesterEnergy(int SnappingClient)
+{
+	if(m_vTraitorTesters.empty())
+		return;
+
+	const CSnapContext Context(GameServer()->GetClientVersion(SnappingClient), Server()->IsSixup(SnappingClient), SnappingClient);
+	const auto SnapSquare = [&](int BaseSnapId, const vec2 &Center) {
+		const float HalfSize = 4.0f;
+		GameServer()->SnapLaserObject(Context, BaseSnapId + 0, Center + vec2(-HalfSize, -HalfSize), Center + vec2(HalfSize, -HalfSize), -1, -1, LASERTYPE_RIFLE, 0, 0);
+		GameServer()->SnapLaserObject(Context, BaseSnapId + 1, Center + vec2(HalfSize, -HalfSize), Center + vec2(HalfSize, HalfSize), -1, -1, LASERTYPE_RIFLE, 0, 0);
+		GameServer()->SnapLaserObject(Context, BaseSnapId + 2, Center + vec2(HalfSize, HalfSize), Center + vec2(-HalfSize, HalfSize), -1, -1, LASERTYPE_RIFLE, 0, 0);
+		GameServer()->SnapLaserObject(Context, BaseSnapId + 3, Center + vec2(-HalfSize, HalfSize), Center + vec2(-HalfSize, -HalfSize), -1, -1, LASERTYPE_RIFLE, 0, 0);
+	};
+
+	for(size_t TesterIndex = 0; TesterIndex < m_vTraitorTesters.size(); TesterIndex++)
+	{
+		const STraitorTester &Tester = m_vTraitorTesters[TesterIndex];
+		const int EnergyCount = minimum(TRAITOR_TESTER_MAX_ENERGY, Tester.m_Energy);
+		for(int i = 0; i < EnergyCount; i++)
+		{
+			const int Column = i % 3;
+			const int Row = i / 3;
+			const vec2 Pos = Tester.m_EnergyDisplayTopLeft + vec2((float)Column * 32.0f, (float)Row * 32.0f);
+			const int SnapId = ENERGY_TRAITOR_TESTER_SNAP_ID_BASE + ((int)TesterIndex * TRAITOR_TESTER_MAX_ENERGY + i) * 4;
+			SnapSquare(SnapId, Pos);
+		}
+	}
+
+	for(size_t i = 0; i < m_vTravelingTraitorTesterEnergies.size(); i++)
+	{
+		const STravelingTraitorTesterEnergy &Travel = m_vTravelingTraitorTesterEnergies[i];
+		if(Travel.m_EndTick <= Travel.m_StartTick)
+			continue;
+
+		const float t = std::clamp((float)(Server()->Tick() - Travel.m_StartTick) / (float)(Travel.m_EndTick - Travel.m_StartTick), 0.0f, 1.0f);
+		const vec2 Pos = mix(Travel.m_StartPos, Travel.m_TargetPos, t);
+		const int SnapId = ENERGY_TRAITOR_TESTER_TRAVEL_SNAP_ID_BASE + (int)i * 4;
+		SnapSquare(SnapId, Pos);
+	}
+}
+
+void CGameControllerTtt::SnapLighthouse(int SnappingClient)
+{
+	if(m_vLighthousePositions.empty())
+		return;
+
+	int TotalBeaconEnergy = 0;
+	for(const SBeacon &Beacon : m_vBeacons)
+		TotalBeaconEnergy += maximum(0, Beacon.m_Energy);
+	if(TotalBeaconEnergy <= 0)
+		return;
+
+	const CSnapContext Context(GameServer()->GetClientVersion(SnappingClient), Server()->IsSixup(SnappingClient), SnappingClient);
+	const auto SnapSquare = [&](int BaseSnapId, const vec2 &Center) {
+		const float HalfSize = 4.0f;
+		GameServer()->SnapLaserObject(Context, BaseSnapId + 0, Center + vec2(-HalfSize, -HalfSize), Center + vec2(HalfSize, -HalfSize), -1, -1, LASERTYPE_RIFLE, 0, 0);
+		GameServer()->SnapLaserObject(Context, BaseSnapId + 1, Center + vec2(HalfSize, -HalfSize), Center + vec2(HalfSize, HalfSize), -1, -1, LASERTYPE_RIFLE, 0, 0);
+		GameServer()->SnapLaserObject(Context, BaseSnapId + 2, Center + vec2(HalfSize, HalfSize), Center + vec2(-HalfSize, HalfSize), -1, -1, LASERTYPE_RIFLE, 0, 0);
+		GameServer()->SnapLaserObject(Context, BaseSnapId + 3, Center + vec2(-HalfSize, HalfSize), Center + vec2(-HalfSize, -HalfSize), -1, -1, LASERTYPE_RIFLE, 0, 0);
+	};
+
+	for(size_t LighthouseIndex = 0; LighthouseIndex < m_vLighthousePositions.size(); LighthouseIndex++)
+	{
+		const vec2 &CenterPos = m_vLighthousePositions[LighthouseIndex];
+		for(int i = 0; i < TotalBeaconEnergy; i++)
+		{
+			const float Angle = (2.0f * pi * (float)i) / (float)TotalBeaconEnergy;
+			const vec2 Pos = CenterPos + vec2(std::cos(Angle), std::sin(Angle)) * (float)BEACON_RING_RADIUS;
+			const int SnapId = ENERGY_LIGHTHOUSE_RING_SNAP_ID_BASE + ((int)LighthouseIndex * TotalBeaconEnergy + i) * 4;
+			SnapSquare(SnapId, Pos);
+		}
 	}
 }
 
@@ -1030,7 +1498,9 @@ void CGameControllerTtt::OnInit()
 	m_aGraceAutoJoinOptOut.fill(false);
 	ResetEnergyState();
 	RefreshTraitorTesterRevealPositions();
+	RefreshLighthousePositions();
 	RefreshBeaconPositions();
+	RebuildShieldSpawnTilesFromMap();
 
 	if(!g_TttWaitingBootstrapHandled && g_Config.m_SvWaitingMap[0] != '\0' && !IsOnWaitingMap())
 	{
@@ -1058,6 +1528,8 @@ void CGameControllerTtt::Snap(int SnappingClient)
 
 	SnapEnergy(SnappingClient);
 	SnapBeacons(SnappingClient);
+	SnapTraitorTesterEnergy(SnappingClient);
+	SnapLighthouse(SnappingClient);
 
 	const bool ViewerIsTraitor = m_aRoles[SnappingClient] == ERole::TERRORIST;
 
@@ -1250,10 +1722,14 @@ void CGameControllerTtt::Tick()
 
 	if(!IsOnWaitingMap())
 	{
+		TickTraitorTesterEnergy();
 		TickTraitorTester();
+		TickLighthouse();
 		TickUniqueLaser();
 		TickEnergyPickups();
 		TickEnergySpawns();
+		TickShieldPickups();
+		TickShieldSpawns();
 		TickEnergyTrails();
 		TickBeacons();
 
@@ -1279,6 +1755,12 @@ void CGameControllerTtt::Tick()
 			ResetRoles();
 			m_aGraceAutoJoinOptOut.fill(false);
 			ResetEnergyState();
+			for(auto &Beacon : m_vBeacons)
+			{
+				Beacon.m_Energy = BEACON_MAX_ENERGY / 2;
+				Beacon.m_Broken = false;
+			}
+			RebuildShieldSpawnTilesFromMap();
 
 			if(!m_DebugEnergyNodeSummarySent)
 			{
@@ -1512,6 +1994,23 @@ bool CGameControllerTtt::OnEntity(int Index, int x, int y, int Layer, int Flags,
 		}
 
 		// Laser shield tile (index 229 / ENTITY_ARMOR_LASER) is reserved as TTT energy node.
+		return true;
+	}
+
+	if(Initial && Index == ENTITY_ARMOR_1)
+	{
+		const int MapIndex = y * GameServer()->Collision()->GetWidth() + x;
+		if(m_ShieldSpawnTileByMapIndex.find(MapIndex) == m_ShieldSpawnTileByMapIndex.end())
+		{
+			SShieldSpawnTile Tile;
+			Tile.m_MapIndex = MapIndex;
+			Tile.m_Pos = vec2(x * 32.0f + 16.0f, y * 32.0f + 16.0f);
+			Tile.m_HasShield = false;
+			m_ShieldSpawnTileByMapIndex[MapIndex] = (int)m_vShieldSpawnTiles.size();
+			m_vShieldSpawnTiles.push_back(Tile);
+		}
+
+		// Shield tile (index 6 / ENTITY_ARMOR_1) is reserved as a TTT shield spawn node.
 		return true;
 	}
 

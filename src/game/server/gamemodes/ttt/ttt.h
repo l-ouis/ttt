@@ -56,12 +56,15 @@ private:
 	std::array<ERole, MAX_CLIENTS> m_aRoles{};
 	std::array<bool, MAX_CLIENTS> m_aGraceAutoJoinOptOut{};
 	std::array<int, MAX_CLIENTS> m_aPlayerEnergy{};
+	std::array<int, MAX_CLIENTS> m_aLastBroadcastedEnergy{};
 	std::array<std::deque<vec2>, MAX_CLIENTS> m_aPlayerEnergyTrail{};
 	std::vector<vec2> m_vTraitorTesterRevealPositions;
+	std::vector<vec2> m_vLighthousePositions;
 	std::vector<std::string> m_vRoundStartInnocentNames;
 	std::vector<std::string> m_vRoundStartTerroristNames;
 	int m_LastEnergySpawnSecond = -1;
 	bool m_DebugEnergySpawnAnnounced = false;
+	bool m_DebugShieldSpawnAnnounced = false;
 	bool m_DebugEnergyNodeSummarySent = false;
 	int m_DebugEnergyNodesGameLayer = 0;
 	int m_DebugEnergyNodesFrontLayer = 0;
@@ -76,11 +79,21 @@ private:
 	std::vector<SEnergySpawnTile> m_vEnergySpawnTiles;
 	std::unordered_map<int, int> m_EnergySpawnTileByMapIndex;
 
+	struct SShieldSpawnTile
+	{
+		int m_MapIndex = -1;
+		vec2 m_Pos{};
+		bool m_HasShield = false;
+	};
+	std::vector<SShieldSpawnTile> m_vShieldSpawnTiles;
+	std::unordered_map<int, int> m_ShieldSpawnTileByMapIndex;
+
 	struct SBeacon
 	{
 		int m_MapIndex = -1;
 		vec2 m_Pos{};
 		int m_Energy = 0;
+		bool m_Broken = false;
 	};
 	std::vector<SBeacon> m_vBeacons;
 
@@ -95,6 +108,28 @@ private:
 	std::vector<STravelingBeaconEnergy> m_vTravelingBeaconEnergies;
 	std::array<int, MAX_CLIENTS> m_aLastBeaconDepositSecond{};
 	int m_LastBeaconDecaySecond = -1;
+	std::array<int, MAX_CLIENTS> m_aLastTraitorTesterDepositSecond{};
+
+	struct STravelingTraitorTesterEnergy
+	{
+		vec2 m_StartPos{};
+		vec2 m_TargetPos{};
+		int m_TraitorTesterIndex = -1;
+		int m_StartTick = -1;
+		int m_EndTick = -1;
+	};
+	std::vector<STravelingTraitorTesterEnergy> m_vTravelingTraitorTesterEnergies;
+
+	struct STraitorTester
+	{
+		vec2 m_Pos{};
+		vec2 m_EnergyDisplayTopLeft{};
+		int m_Energy = 0;
+	};
+	std::vector<STraitorTester> m_vTraitorTesters;
+	bool m_LighthouseLowEnergyAnnounced = false;
+	bool m_DreadfulMode = false;
+	int m_LastDreadDamageSecond = -1;
 
 	bool IsOnWaitingMap() const;
 	int NumPlayersReadyForStart() const;
@@ -105,7 +140,10 @@ private:
 	int CountAliveInInnocentSide() const;
 	void AnnounceWinningRole(ERole WinningRole);
 	void RefreshTraitorTesterRevealPositions();
+	void RefreshLighthousePositions();
 	void TickTraitorTester();
+	void TickTraitorTesterEnergy();
+	void TickLighthouse();
 	bool IsCharacterInsideTraitorTester(const CCharacter *pChr) const;
 	void TriggerTraitorTesterReveal(int ClientId);
 	bool GiveUniqueLaserTo(int ClientId);
@@ -114,11 +152,17 @@ private:
 	void ResetEnergyState();
 	void TickEnergySpawns();
 	void TickEnergyPickups();
+	void TickShieldSpawns();
+	void TickShieldPickups();
 	void TickEnergyTrails();
 	void SnapEnergy(int SnappingClient);
 	void RebuildEnergySpawnTilesFromMap();
+	void RebuildShieldSpawnTilesFromMap();
 	void RefreshBeaconPositions();
 	void TickBeacons();
+	void TickBrokenBeaconEffects();
 	void SnapBeacons(int SnappingClient);
+	void SnapTraitorTesterEnergy(int SnappingClient);
+	void SnapLighthouse(int SnappingClient);
 };
 #endif

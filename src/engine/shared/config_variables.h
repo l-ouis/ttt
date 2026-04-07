@@ -463,6 +463,7 @@ MACRO_CONFIG_STR(SvWaitingMap, sv_waiting_map, 128, "ttt_waiting", CFGFLAG_SERVE
 MACRO_CONFIG_INT(SvWaitingDuration, sv_waiting_duration, 15, 0, 600, CFGFLAG_SERVER, "TTT waiting-map countdown in seconds after at least 4 players are ready")
 MACRO_CONFIG_INT(SvGraceDuration, sv_grace_duration, 30, 0, 600, CFGFLAG_SERVER | CFGFLAG_GAME, "TTT grace period in seconds at round-map start; can be overridden by map settings")
 MACRO_CONFIG_INT(SvEnergySpawnChance, sv_energy_spawn_chance, 10, 1, 100, CFGFLAG_SERVER | CFGFLAG_GAME, "TTT energy spawn chance per second and per laser-shield tile (x/100)")
+MACRO_CONFIG_INT(SvShieldSpawnChance, sv_shield_spawn_chance, 10, 1, 100, CFGFLAG_SERVER | CFGFLAG_GAME, "TTT shield spawn chance per second and per normal shield tile (x/100)")
 MACRO_CONFIG_STR(SvMap1, sv_map_1, 128, "ttt_test", CFGFLAG_SERVER, "TTT map pool slot 1")
 MACRO_CONFIG_STR(SvMap2, sv_map_2, 128, "", CFGFLAG_SERVER, "TTT map pool slot 2")
 MACRO_CONFIG_STR(SvMap3, sv_map_3, 128, "", CFGFLAG_SERVER, "TTT map pool slot 3")
