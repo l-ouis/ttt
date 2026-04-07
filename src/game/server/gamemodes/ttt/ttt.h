@@ -26,9 +26,13 @@ public:
 	bool OnCharacterTakeDamage(vec2 &Force, int &Dmg, int &From, int &Weapon, CCharacter &Character) override;
 	bool DoWincheckRound() override;
 	void OnRoundEnd() override;
+	void SendDeathInfoMessage(CCharacter *pVictim, int Killer, int Weapon, int ModeSpecial) override;
 	bool SkipDamage(int Dmg, int From, int Weapon, const CCharacter *pCharacter, bool &ApplyForce) override;
 	bool OnEntity(int Index, int x, int y, int Layer, int Flags, bool Initial, int Number = 0) override;
 	int OnCharacterDeath(class CCharacter *pVictim, CPlayer *pKiller, int Weapon) override;
+	bool IsGracePeriodActive() const;
+	bool CanPickUpWeaponDuringGrace(int ClientId) const;
+	void CountGraceWeaponPickup(int ClientId);
 
 private:
 	enum class ERole
@@ -55,6 +59,7 @@ private:
 	bool m_RolesAssigned = false;
 	std::array<ERole, MAX_CLIENTS> m_aRoles{};
 	std::array<bool, MAX_CLIENTS> m_aGraceAutoJoinOptOut{};
+	std::array<int, MAX_CLIENTS> m_aGraceWeaponPickupCount{};
 	std::array<int, MAX_CLIENTS> m_aPlayerEnergy{};
 	std::array<int, MAX_CLIENTS> m_aLastBroadcastedEnergy{};
 	std::array<std::deque<vec2>, MAX_CLIENTS> m_aPlayerEnergyTrail{};

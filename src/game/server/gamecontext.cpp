@@ -2382,9 +2382,15 @@ void CGameContext::OnSayNetMessage(const CNetMsg_Cl_Say *pMsg, int ClientId, con
 	else
 		Team = TEAM_ALL;
 
+	if(pPlayer->GetTeam() == TEAM_SPECTATORS)
+		Team = TEAM_SPECTATORS;
+
 	// ddnet-insta
 	if(m_pController->OnChatMessage(pMsg, Length, Team, pPlayer))
 		return;
+
+	if(pPlayer->GetTeam() == TEAM_SPECTATORS)
+		Team = TEAM_SPECTATORS;
 
 	if(pMsg->m_pMessage[0] == '/')
 	{

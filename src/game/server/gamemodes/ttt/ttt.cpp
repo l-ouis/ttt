@@ -21,6 +21,9 @@
 #include <string>
 #include <vector>
 
+bool TttCanTakeGraceWeaponPickup(CGameContext *pGameServer, int ClientId);
+void TttCountGraceWeaponPickup(CGameContext *pGameServer, int ClientId);
+
 namespace
 {
 constexpr int PICKUP_PHYSICS_RADIUS = 14;
@@ -30,6 +33,8 @@ constexpr int ENERGY_TRAIL_SNAP_ID_BASE = 9000;
 constexpr int ENERGY_MAX_PER_PLAYER = 5;
 constexpr int ENERGY_TRAIL_SPACING_TICKS = 6;
 constexpr int ENERGY_TRAIL_MAX_HISTORY = 128;
+constexpr float ENERGY_PICKUP_RADIUS = 32.0f;
+constexpr float SHIELD_PICKUP_RADIUS = 32.0f;
 constexpr int BEACON_RADIUS = 10 * 32;
 constexpr int BEACON_MAX_ENERGY = 10;
 constexpr int BEACON_RING_RADIUS = 3 * 32;
@@ -77,7 +82,6 @@ int TttRandomPickupWeapon()
 	static const int s_aTttWeapons[] = {
 		WEAPON_GUN,
 		WEAPON_SHOTGUN,
-		WEAPON_GRENADE,
 	};
 	return s_aTttWeapons[secure_rand_below(std::size(s_aTttWeapons))];
 }
@@ -128,6 +132,9 @@ public:
 			if(m_Layer == LAYER_SWITCH && m_Number > 0 && !Switchers()[m_Number].m_aStatus[pChr->Team()])
 				continue;
 
+			if(pChr->GetPlayer() && !TttCanTakeGraceWeaponPickup(GameServer(), pChr->GetPlayer()->GetCid()))
+				continue;
+
 			const bool HadWeapon = pChr->GetWeaponGot(m_Weapon);
 			if(m_InfiniteAmmo)
 			{
@@ -156,6 +163,9 @@ public:
 
 			if(pChr->GetPlayer())
 				GameServer()->SendWeaponPickup(pChr->GetPlayer()->GetCid(), m_Weapon);
+
+			if(pChr->GetPlayer())
+				TttCountGraceWeaponPickup(GameServer(), pChr->GetPlayer()->GetCid());
 
 			m_MarkedForDestroy = true;
 			return;
@@ -674,7 +684,7 @@ void CGameControllerTtt::RefreshBeaconPositions()
 
 void CGameControllerTtt::TickBrokenBeaconEffects()
 {
-	if(Server()->Tick() % Server()->TickSpeed() != 0)
+	if(Server()->Tick() % 10 != 0)
 		return;
 
 	for(const SBeacon &Beacon : m_vBeacons)
@@ -682,15 +692,12 @@ void CGameControllerTtt::TickBrokenBeaconEffects()
 		if(!Beacon.m_Broken)
 			continue;
 
-		for(int i = 0; i < 3; i++)
-		{
-			const float tAngle = (float)secure_rand_below(10000u) / 10000.0f;
-			const float tRadius = (float)secure_rand_below(10000u) / 10000.0f;
-			const float Angle = 2.0f * pi * tAngle;
-			const float Radius = (float)BEACON_RADIUS * std::sqrt(tRadius);
-			const vec2 Pos = Beacon.m_Pos + vec2(std::cos(Angle), std::sin(Angle)) * Radius;
-			GameServer()->CreatePlayerSpawn(Pos);
-		}
+		const float tAngle = (float)secure_rand_below(10000u) / 10000.0f;
+		const float tRadius = (float)secure_rand_below(10000u) / 10000.0f;
+		const float Angle = 2.0f * pi * tAngle;
+		const float Radius = (float)BEACON_RADIUS * std::sqrt(tRadius);
+		const vec2 Pos = Beacon.m_Pos + vec2(std::cos(Angle), std::sin(Angle)) * Radius;
+		GameServer()->CreateDeath(Pos, -1);
 	}
 }
 
@@ -855,6 +862,7 @@ void CGameControllerTtt::TickLighthouse()
 			continue;
 
 		GameServer()->CreateDamageInd(pChr->GetPos(), 0.0f, 1);
+		GameServer()->CreateDeath(pChr->GetPos(), ClientId);
 		pChr->AddHealth(-1);
 		if(pChr->Health() <= 0)
 			pChr->Die(ClientId, WEAPON_GAME);
@@ -1022,14 +1030,28 @@ void CGameControllerTtt::TickEnergyPickups()
 		if(!pChr || !pChr->IsAlive())
 			continue;
 
-		const int MapIndex = GameServer()->Collision()->GetPureMapIndex(pChr->GetPos());
-		auto It = m_EnergySpawnTileByMapIndex.find(MapIndex);
-		if(It == m_EnergySpawnTileByMapIndex.end())
+		int ClosestTileIndex = -1;
+		float ClosestDistance = 0.0f;
+		for(int i = 0; i < (int)m_vEnergySpawnTiles.size(); i++)
+		{
+			const SEnergySpawnTile &Tile = m_vEnergySpawnTiles[i];
+			if(!Tile.m_HasEnergy)
+				continue;
+
+			const float Distance = distance(pChr->GetPos(), Tile.m_Pos);
+			if(Distance > ENERGY_PICKUP_RADIUS)
+				continue;
+			if(ClosestTileIndex == -1 || Distance < ClosestDistance)
+			{
+				ClosestTileIndex = i;
+				ClosestDistance = Distance;
+			}
+		}
+
+		if(ClosestTileIndex == -1)
 			continue;
 
-		SEnergySpawnTile &Tile = m_vEnergySpawnTiles[It->second];
-		if(!Tile.m_HasEnergy)
-			continue;
+		SEnergySpawnTile &Tile = m_vEnergySpawnTiles[ClosestTileIndex];
 
 		Tile.m_HasEnergy = false;
 		m_aPlayerEnergy[ClientId] = minimum(ENERGY_MAX_PER_PLAYER, m_aPlayerEnergy[ClientId] + 1);
@@ -1082,14 +1104,28 @@ void CGameControllerTtt::TickShieldPickups()
 		if(!pChr || !pChr->IsAlive())
 			continue;
 
-		const int MapIndex = GameServer()->Collision()->GetPureMapIndex(pChr->GetPos());
-		auto It = m_ShieldSpawnTileByMapIndex.find(MapIndex);
-		if(It == m_ShieldSpawnTileByMapIndex.end())
+		int ClosestTileIndex = -1;
+		float ClosestDistance = 0.0f;
+		for(int i = 0; i < (int)m_vShieldSpawnTiles.size(); i++)
+		{
+			const SShieldSpawnTile &Tile = m_vShieldSpawnTiles[i];
+			if(!Tile.m_HasShield)
+				continue;
+
+			const float Distance = distance(pChr->GetPos(), Tile.m_Pos);
+			if(Distance > SHIELD_PICKUP_RADIUS)
+				continue;
+			if(ClosestTileIndex == -1 || Distance < ClosestDistance)
+			{
+				ClosestTileIndex = i;
+				ClosestDistance = Distance;
+			}
+		}
+
+		if(ClosestTileIndex == -1)
 			continue;
 
-		SShieldSpawnTile &Tile = m_vShieldSpawnTiles[It->second];
-		if(!Tile.m_HasShield)
-			continue;
+		SShieldSpawnTile &Tile = m_vShieldSpawnTiles[ClosestTileIndex];
 
 		if(pChr->IncreaseArmor(1))
 		{
@@ -1496,6 +1532,7 @@ void CGameControllerTtt::OnInit()
 	m_EnergySpawnTileByMapIndex.clear();
 	ResetRoles();
 	m_aGraceAutoJoinOptOut.fill(false);
+	m_aGraceWeaponPickupCount.fill(0);
 	ResetEnergyState();
 	RefreshTraitorTesterRevealPositions();
 	RefreshLighthousePositions();
@@ -1532,6 +1569,7 @@ void CGameControllerTtt::Snap(int SnappingClient)
 	SnapLighthouse(SnappingClient);
 
 	const bool ViewerIsTraitor = m_aRoles[SnappingClient] == ERole::TERRORIST;
+	const bool ViewerIsSpectator = pViewer->GetTeam() == TEAM_SPECTATORS;
 
 	for(const CPlayer *pPlayer : GameServer()->m_apPlayers)
 	{
@@ -1547,7 +1585,7 @@ void CGameControllerTtt::Snap(int SnappingClient)
 			continue;
 
 		const ERole Role = m_aRoles[ClientId];
-		const bool ShowRedTraitorFlag = Role == ERole::TERRORIST && ViewerIsTraitor;
+		const bool ShowRedTraitorFlag = Role == ERole::TERRORIST && (ViewerIsTraitor || ViewerIsSpectator);
 		const bool ShowBlueDetectiveFlag = Role == ERole::DETECTIVE;
 		if(!ShowRedTraitorFlag && !ShowBlueDetectiveFlag)
 			continue;
@@ -1752,6 +1790,7 @@ void CGameControllerTtt::Tick()
 			const int GraceDurationSeconds = g_Config.m_SvGraceDuration;
 			m_GracePeriodEndTick = m_ActiveMapStartTick + GraceDurationSeconds * Server()->TickSpeed();
 			m_LastGraceCountdownSecond = -1;
+			m_aGraceWeaponPickupCount.fill(0);
 			ResetRoles();
 			m_aGraceAutoJoinOptOut.fill(false);
 			ResetEnergyState();
@@ -1839,6 +1878,7 @@ void CGameControllerTtt::Tick()
 	m_UniqueLaserOwnerCid = -1;
 	ResetRoles();
 	m_aGraceAutoJoinOptOut.fill(false);
+	m_aGraceWeaponPickupCount.fill(0);
 	ResetEnergyState();
 
 	constexpr int MIN_READY_PLAYERS = 4;
@@ -1952,6 +1992,71 @@ void CGameControllerTtt::OnRoundEnd()
 
 	// Give players time to read winner broadcasts before map transition.
 	m_ReturnToWaitingMapTick = Server()->Tick() + 3 * Server()->TickSpeed();
+}
+
+void CGameControllerTtt::SendDeathInfoMessage(CCharacter *pVictim, int Killer, int Weapon, int ModeSpecial)
+{
+	if(!pVictim || !pVictim->GetPlayer())
+		return;
+
+	CNetMsg_Sv_KillMsg Msg;
+	Msg.m_Killer = -1;
+	Msg.m_Victim = pVictim->GetPlayer()->GetCid();
+	Msg.m_Weapon = Weapon;
+	Msg.m_ModeSpecial = ModeSpecial;
+	Server()->SendPackMsg(&Msg, MSGFLAG_VITAL, -1);
+}
+
+bool CGameControllerTtt::IsGracePeriodActive() const
+{
+	return !IsOnWaitingMap() && m_GracePeriodEndTick != -1 && Server()->Tick() < m_GracePeriodEndTick;
+}
+
+bool CGameControllerTtt::CanPickUpWeaponDuringGrace(int ClientId) const
+{
+	if(!IsGracePeriodActive())
+		return true;
+
+	if(ClientId < 0 || ClientId >= MAX_CLIENTS)
+		return false;
+
+	return m_aGraceWeaponPickupCount[ClientId] < 5;
+}
+
+void CGameControllerTtt::CountGraceWeaponPickup(int ClientId)
+{
+	if(!IsGracePeriodActive())
+		return;
+
+	if(ClientId < 0 || ClientId >= MAX_CLIENTS)
+		return;
+
+	if(m_aGraceWeaponPickupCount[ClientId] < 5)
+		++m_aGraceWeaponPickupCount[ClientId];
+}
+
+bool TttCanTakeGraceWeaponPickup(CGameContext *pGameServer, int ClientId)
+{
+	if(!pGameServer || !pGameServer->m_pController)
+		return true;
+
+	auto *pController = dynamic_cast<CGameControllerTtt *>(pGameServer->m_pController);
+	if(!pController)
+		return true;
+
+	return pController->CanPickUpWeaponDuringGrace(ClientId);
+}
+
+void TttCountGraceWeaponPickup(CGameContext *pGameServer, int ClientId)
+{
+	if(!pGameServer || !pGameServer->m_pController)
+		return;
+
+	auto *pController = dynamic_cast<CGameControllerTtt *>(pGameServer->m_pController);
+	if(!pController)
+		return;
+
+	pController->CountGraceWeaponPickup(ClientId);
 }
 
 bool CGameControllerTtt::SkipDamage(int Dmg, int From, int Weapon, const CCharacter *pCharacter, bool &ApplyForce)
