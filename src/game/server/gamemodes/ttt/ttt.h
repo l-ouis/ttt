@@ -50,6 +50,7 @@ private:
 	int m_GracePeriodEndTick = -1;
 	int m_LastGraceCountdownSecond = -1;
 	int m_UniqueLaserOwnerCid = -1;
+	int m_DetectiveLaserCooldownEndTick = -1;
 	int m_PostWinGraceEndTick = -1;
 	int m_TraitorTesterClientId = -1;
 	int m_TraitorTesterStartTick = -1;
@@ -59,6 +60,7 @@ private:
 	bool m_RolesAssigned = false;
 	std::array<ERole, MAX_CLIENTS> m_aRoles{};
 	std::array<bool, MAX_CLIENTS> m_aGraceAutoJoinOptOut{};
+	std::array<bool, MAX_CLIENTS> m_aForcedToSpectatorsDuringRound{};
 	std::array<int, MAX_CLIENTS> m_aGraceWeaponPickupCount{};
 	std::array<int, MAX_CLIENTS> m_aPlayerEnergy{};
 	std::array<int, MAX_CLIENTS> m_aLastBroadcastedEnergy{};

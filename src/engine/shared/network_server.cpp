@@ -227,12 +227,40 @@ int CNetServer::TryAcceptClient(NETADDR &Addr, SECURITY_TOKEN SecurityToken, boo
 	}
 
 	int Slot = -1;
-	for(int i = 0; i < MaxClients(); i++)
+	if(g_Config.m_SvRandomClientSlots)
 	{
-		if(m_aSlots[i].m_Connection.State() == CNetConnection::EState::OFFLINE)
+		int FreeSlots = 0;
+		for(int i = 0; i < MaxClients(); i++)
 		{
-			Slot = i;
-			break;
+			if(m_aSlots[i].m_Connection.State() == CNetConnection::EState::OFFLINE)
+				FreeSlots++;
+		}
+
+		if(FreeSlots > 0)
+		{
+			int Pick = secure_rand_below(FreeSlots);
+			for(int i = 0; i < MaxClients(); i++)
+			{
+				if(m_aSlots[i].m_Connection.State() != CNetConnection::EState::OFFLINE)
+					continue;
+				if(Pick == 0)
+				{
+					Slot = i;
+					break;
+				}
+				Pick--;
+			}
+		}
+	}
+	else
+	{
+		for(int i = 0; i < MaxClients(); i++)
+		{
+			if(m_aSlots[i].m_Connection.State() == CNetConnection::EState::OFFLINE)
+			{
+				Slot = i;
+				break;
+			}
 		}
 	}
 

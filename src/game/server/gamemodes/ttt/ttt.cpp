@@ -231,8 +231,9 @@ bool CGameControllerTtt::GiveUniqueLaserTo(int ClientId)
 		return false;
 
 	pChr->SetWeaponGot(WEAPON_LASER, true);
-	pChr->SetWeaponAmmo(WEAPON_LASER, -1);
+	pChr->SetWeaponAmmo(WEAPON_LASER, 1);
 	m_UniqueLaserOwnerCid = ClientId;
+	m_DetectiveLaserCooldownEndTick = -1;
 	return true;
 }
 
@@ -247,6 +248,7 @@ void CGameControllerTtt::TickUniqueLaser()
 	if(IsOnWaitingMap() || !m_RolesAssigned)
 	{
 		m_UniqueLaserOwnerCid = -1;
+		m_DetectiveLaserCooldownEndTick = -1;
 		return;
 	}
 
@@ -258,7 +260,21 @@ void CGameControllerTtt::TickUniqueLaser()
 			CCharacter *pOwnerChr = pOwner->GetCharacter();
 			if(pOwnerChr && pOwnerChr->IsAlive() && pOwnerChr->GetWeaponGot(WEAPON_LASER))
 			{
-				pOwnerChr->SetWeaponAmmo(WEAPON_LASER, -1);
+				const bool OwnerIsDetective = m_aRoles[pOwner->GetCid()] == ERole::DETECTIVE;
+				if(OwnerIsDetective)
+				{
+					if(pOwnerChr->GetWeaponAmmo(WEAPON_LASER) <= 0 && m_DetectiveLaserCooldownEndTick == -1)
+						m_DetectiveLaserCooldownEndTick = Server()->Tick() + 7 * Server()->TickSpeed();
+
+					if(m_DetectiveLaserCooldownEndTick != -1 && Server()->Tick() >= m_DetectiveLaserCooldownEndTick)
+						m_DetectiveLaserCooldownEndTick = -1;
+
+					pOwnerChr->SetWeaponAmmo(WEAPON_LASER, m_DetectiveLaserCooldownEndTick == -1 ? 1 : 0);
+				}
+				else
+				{
+					pOwnerChr->SetWeaponAmmo(WEAPON_LASER, -1);
+				}
 				return;
 			}
 		}
@@ -281,7 +297,10 @@ void CGameControllerTtt::TickUniqueLaser()
 		if(NewOwnerCid == -1)
 		{
 			NewOwnerCid = pPlayer->GetCid();
-			pChr->SetWeaponAmmo(WEAPON_LASER, -1);
+			if(m_aRoles[NewOwnerCid] == ERole::DETECTIVE)
+				pChr->SetWeaponAmmo(WEAPON_LASER, m_DetectiveLaserCooldownEndTick == -1 ? 1 : 0);
+			else
+				pChr->SetWeaponAmmo(WEAPON_LASER, -1);
 		}
 		else
 		{
@@ -296,6 +315,8 @@ void CGameControllerTtt::TickUniqueLaser()
 	}
 
 	m_UniqueLaserOwnerCid = NewOwnerCid;
+	if(NewOwnerCid == -1)
+		m_DetectiveLaserCooldownEndTick = -1;
 }
 
 CGameControllerTtt::CGameControllerTtt(CGameContext *pGameServer) :
@@ -1371,7 +1392,7 @@ void CGameControllerTtt::AssignRoles()
 	for(int ClientId : vPlayers)
 		m_aRoles[ClientId] = ERole::INNOCENT;
 
-	const int NumTerrorists = std::max(1, (int)vPlayers.size() / 4);
+	const int NumTerrorists = std::max(1, (int)(vPlayers.size() + 2) / 3);
 	std::vector<int> vCandidates = vPlayers;
 	for(int i = 0; i < NumTerrorists && !vCandidates.empty(); i++)
 	{
@@ -1528,10 +1549,12 @@ void CGameControllerTtt::OnInit()
 	m_TraitorTesterStartTick = -1;
 	m_TraitorTesterResolved = false;
 	m_UniqueLaserOwnerCid = -1;
+	m_DetectiveLaserCooldownEndTick = -1;
 	m_vEnergySpawnTiles.clear();
 	m_EnergySpawnTileByMapIndex.clear();
 	ResetRoles();
 	m_aGraceAutoJoinOptOut.fill(false);
+	m_aForcedToSpectatorsDuringRound.fill(false);
 	m_aGraceWeaponPickupCount.fill(0);
 	ResetEnergyState();
 	RefreshTraitorTesterRevealPositions();
@@ -1634,6 +1657,7 @@ void CGameControllerTtt::OnCharacterSpawn(CCharacter *pChr)
 	pChr->SetWeaponAmmo(WEAPON_NINJA, 0);
 	pChr->SetActiveWeapon(WEAPON_HAMMER);
 	pChr->SetLastWeapon(WEAPON_HAMMER);
+	pChr->SetArmor(10);
 }
 
 void CGameControllerTtt::AmmoRegen(CCharacter *pChr)
@@ -1650,6 +1674,14 @@ void CGameControllerTtt::AmmoRegen(CCharacter *pChr)
 void CGameControllerTtt::OnPlayerConnect(CPlayer *pPlayer)
 {
 	CGameControllerBasePvp::OnPlayerConnect(pPlayer);
+
+	if(IsOnWaitingMap() && pPlayer->GetTeam() == TEAM_SPECTATORS)
+	{
+		DoTeamChange(pPlayer, TEAM_GAME, false);
+		pPlayer->m_RespawnTick = 0;
+		pPlayer->TryRespawn();
+		return;
+	}
 
 	const bool GraceActive = !IsOnWaitingMap() && m_GracePeriodEndTick != -1 && Server()->Tick() < m_GracePeriodEndTick;
 	if(GraceActive && pPlayer->GetTeam() == TEAM_SPECTATORS)
@@ -1672,15 +1704,23 @@ void CGameControllerTtt::DoTeamChange(CPlayer *pPlayer, int Team, bool DoChatMsg
 		return;
 
 	const int OldTeam = pPlayer->GetTeam();
+	const int Cid = pPlayer->GetCid();
 	const bool GraceActive = !IsOnWaitingMap() && m_GracePeriodEndTick != -1 && Server()->Tick() < m_GracePeriodEndTick;
 
 	if(GraceActive)
 	{
 		if(OldTeam != TEAM_SPECTATORS && Team == TEAM_SPECTATORS)
-			m_aGraceAutoJoinOptOut[pPlayer->GetCid()] = true;
+			m_aGraceAutoJoinOptOut[Cid] = true;
 		else if(Team != TEAM_SPECTATORS)
-			m_aGraceAutoJoinOptOut[pPlayer->GetCid()] = false;
+			m_aGraceAutoJoinOptOut[Cid] = false;
 	}
+
+	// If a player returns to game, they're no longer "forced to spectators"
+	if(Team != TEAM_SPECTATORS)
+		m_aForcedToSpectatorsDuringRound[Cid] = false;
+	// If a player voluntarily joins spectators (not on waiting map), mark them so they won't be auto-restored
+	else if(!IsOnWaitingMap() && OldTeam != TEAM_SPECTATORS)
+		m_aForcedToSpectatorsDuringRound[Cid] = false;
 
 	CGameControllerBasePvp::DoTeamChange(pPlayer, Team, DoChatMsg);
 }
@@ -1711,6 +1751,26 @@ bool CGameControllerTtt::OnCharacterTakeDamage(vec2 &Force, int &Dmg, int &From,
 
 	if(IsOnWaitingMap() && Weapon == WEAPON_HAMMER && Dmg <= 0)
 		Dmg = 3;
+
+	const bool DetectiveLaserHit = Weapon == WEAPON_LASER && From >= 0 && From < MAX_CLIENTS && m_aRoles[From] == ERole::DETECTIVE;
+	if(DetectiveLaserHit)
+		Dmg = 20;
+	if(Dmg > 0 && !DetectiveLaserHit)
+		Dmg = (Dmg + 1) / 2;
+
+	const int VictimCid = Character.GetPlayer() ? Character.GetPlayer()->GetCid() : -1;
+	const bool DetectiveShotInnocent = DetectiveLaserHit && VictimCid >= 0 && VictimCid < MAX_CLIENTS && m_aRoles[VictimCid] == ERole::INNOCENT;
+	if(DetectiveShotInnocent)
+	{
+		CPlayer *pShooter = GameServer()->m_apPlayers[From];
+		CCharacter *pShooterChr = pShooter ? pShooter->GetCharacter() : nullptr;
+		if(pShooterChr && pShooterChr->IsAlive())
+		{
+			pShooterChr->AddHealth(-20);
+			if(pShooterChr->Health() <= 0)
+				pShooterChr->Die(VictimCid, WEAPON_GAME);
+		}
+	}
 
 	OnAnyDamage(Force, Dmg, From, Weapon, &Character);
 
@@ -1791,6 +1851,7 @@ void CGameControllerTtt::Tick()
 			m_GracePeriodEndTick = m_ActiveMapStartTick + GraceDurationSeconds * Server()->TickSpeed();
 			m_LastGraceCountdownSecond = -1;
 			m_aGraceWeaponPickupCount.fill(0);
+			m_aForcedToSpectatorsDuringRound.fill(false);
 			ResetRoles();
 			m_aGraceAutoJoinOptOut.fill(false);
 			ResetEnergyState();
@@ -1869,6 +1930,16 @@ void CGameControllerTtt::Tick()
 		return;
 	}
 
+	// Restore players who were forced to spectators during the round
+	for(CPlayer *pPlayer : GameServer()->m_apPlayers)
+	{
+		if(!pPlayer || !Server()->ClientIngame(pPlayer->GetCid()))
+			continue;
+		if(!m_aForcedToSpectatorsDuringRound[pPlayer->GetCid()])
+			continue;
+		DoTeamChange(pPlayer, TEAM_GAME, false);
+	}
+
 	m_ActiveMapStartTick = -1;
 	m_GracePeriodEndTick = -1;
 	m_LastGraceCountdownSecond = -1;
@@ -1876,10 +1947,26 @@ void CGameControllerTtt::Tick()
 	m_PostWinGraceActive = false;
 	m_PostWinRole = ERole::NONE;
 	m_UniqueLaserOwnerCid = -1;
+	m_DetectiveLaserCooldownEndTick = -1;
 	ResetRoles();
 	m_aGraceAutoJoinOptOut.fill(false);
+	m_aForcedToSpectatorsDuringRound.fill(false);
 	m_aGraceWeaponPickupCount.fill(0);
 	ResetEnergyState();
+
+	for(CPlayer *pPlayer : GameServer()->m_apPlayers)
+	{
+		if(!pPlayer)
+			continue;
+		if(!Server()->ClientIngame(pPlayer->GetCid()))
+			continue;
+		if(pPlayer->GetTeam() != TEAM_SPECTATORS)
+			continue;
+
+		DoTeamChange(pPlayer, TEAM_GAME, false);
+		pPlayer->m_RespawnTick = 0;
+		pPlayer->TryRespawn();
+	}
 
 	constexpr int MIN_READY_PLAYERS = 4;
 	const int StartDelaySeconds = g_Config.m_SvWaitingDuration;
@@ -2192,6 +2279,7 @@ int CGameControllerTtt::OnCharacterDeath(CCharacter *pVictim, class CPlayer *pKi
 		pVictimPlayer->m_ForceTeam.m_Team = TEAM_SPECTATORS;
 		pVictimPlayer->m_ForceTeam.m_Tick = Server()->Tick() + 1;
 		pVictimPlayer->m_RespawnTick = std::max(pVictimPlayer->m_RespawnTick, Server()->Tick() + 2);
+		m_aForcedToSpectatorsDuringRound[pVictimPlayer->GetCid()] = true;
 	}
 
 	return Result;

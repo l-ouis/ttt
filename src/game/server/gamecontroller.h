@@ -166,6 +166,18 @@ public:
 	 */
 	virtual int SnapPlayerScore(int SnappingClient, CPlayer *pPlayer) { return 0; }
 
+	/**
+	 * Sets the latency value that will be shown in the scoreboard.
+	 * Return a negative value to use the actual latency.
+	 *
+	 * @param SnappingClient Client ID of the player that will receive the snapshot.
+	 * @param pPlayer Player that is being snapped.
+	 * @param DefaultLatency The default latency value.
+	 *
+	 * @return the latency value to display, or a negative value to use DefaultLatency.
+	 */
+	virtual int SnapPlayerLatency(int SnappingClient, CPlayer *pPlayer, int DefaultLatency) { return -1; }
+
 	class CFinishTime
 	{
 	public:

@@ -2861,6 +2861,8 @@ if(SERVER)
     gamemodes/ddrace/ddrace/ddrace.h
     gamemodes/mod.cpp
     gamemodes/mod.h
+    gamemodes/outlier/outlier.cpp
+    gamemodes/outlier/outlier.h
     gamemodes/ttt/ttt.cpp
     gamemodes/ttt/ttt.h
     gameworld.cpp

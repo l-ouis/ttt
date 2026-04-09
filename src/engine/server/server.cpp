@@ -3019,6 +3019,102 @@ void CServer::UpdateDebugDummies(bool ForceDisconnect)
 		return;
 
 	g_Config.m_DbgDummies = std::clamp(g_Config.m_DbgDummies, 0, MaxClients());
+	if(g_Config.m_SvRandomClientSlots)
+	{
+		const int DesiredDebugDummies = ForceDisconnect ? 0 : g_Config.m_DbgDummies;
+		int CurrentDebugDummies = 0;
+
+		for(int ClientId = 0; ClientId < MaxClients(); ClientId++)
+		{
+			if(m_aClients[ClientId].m_DebugDummy)
+				CurrentDebugDummies++;
+		}
+
+		for(int ClientId = MaxClients() - 1; CurrentDebugDummies > DesiredDebugDummies && ClientId >= 0; ClientId--)
+		{
+			if(!m_aClients[ClientId].m_DebugDummy)
+				continue;
+			DelClientCallback(ClientId, "Dropping debug dummy", this);
+			CurrentDebugDummies--;
+		}
+
+		while(CurrentDebugDummies < DesiredDebugDummies)
+		{
+			int EmptySlots = 0;
+			for(int ClientId = 0; ClientId < MaxClients(); ClientId++)
+			{
+				if(m_aClients[ClientId].m_State == CClient::STATE_EMPTY)
+					EmptySlots++;
+			}
+
+			if(EmptySlots <= 0)
+				break;
+
+			int Pick = secure_rand_below(EmptySlots);
+			int ClientId = -1;
+			for(int Id = 0; Id < MaxClients(); Id++)
+			{
+				if(m_aClients[Id].m_State != CClient::STATE_EMPTY)
+					continue;
+				if(Pick == 0)
+				{
+					ClientId = Id;
+					break;
+				}
+				Pick--;
+			}
+
+			if(ClientId < 0)
+				break;
+
+			CClient &Client = m_aClients[ClientId];
+			NewClientCallback(ClientId, this, false);
+			Client.m_DebugDummy = true;
+
+			// See https://en.wikipedia.org/wiki/Unique_local_address
+			Client.m_DebugDummyAddr.type = NETTYPE_IPV6;
+			Client.m_DebugDummyAddr.ip[0] = 0xfd;
+			// Global ID (40 bits): random
+			secure_random_fill(&Client.m_DebugDummyAddr.ip[1], 5);
+			// Subnet ID (16 bits): constant
+			Client.m_DebugDummyAddr.ip[6] = 0xc0;
+			Client.m_DebugDummyAddr.ip[7] = 0xde;
+			// Interface ID (64 bits): set to client ID
+			Client.m_DebugDummyAddr.ip[8] = 0x00;
+			Client.m_DebugDummyAddr.ip[9] = 0x00;
+			Client.m_DebugDummyAddr.ip[10] = 0x00;
+			Client.m_DebugDummyAddr.ip[11] = 0x00;
+			uint_to_bytes_be(&Client.m_DebugDummyAddr.ip[12], ClientId);
+			// Port: random like normal clients
+			Client.m_DebugDummyAddr.port = secure_rand_below(65535 - 1024) + 1024;
+			net_addr_str(&Client.m_DebugDummyAddr, Client.m_aDebugDummyAddrString.data(), Client.m_aDebugDummyAddrString.size(), true);
+			net_addr_str(&Client.m_DebugDummyAddr, Client.m_aDebugDummyAddrStringNoPort.data(), Client.m_aDebugDummyAddrStringNoPort.size(), false);
+
+			GameServer()->OnClientConnected(ClientId, nullptr);
+			Client.m_State = CClient::STATE_INGAME;
+			str_format(Client.m_aName, sizeof(Client.m_aName), "Debug dummy %d", CurrentDebugDummies + 1);
+			GameServer()->OnClientEnter(ClientId);
+			CurrentDebugDummies++;
+		}
+
+		for(int ClientId = 0; ClientId < MaxClients(); ClientId++)
+		{
+			CClient &Client = m_aClients[ClientId];
+			if(!Client.m_DebugDummy)
+				continue;
+
+			CNetObj_PlayerInput Input = {0};
+			Input.m_Direction = (ClientId & 1) ? -1 : 1;
+			Client.m_aInputs[0].m_GameTick = Tick() + 1;
+			mem_copy(Client.m_aInputs[0].m_aData, &Input, minimum(sizeof(Input), sizeof(Client.m_aInputs[0].m_aData)));
+			Client.m_LatestInput = Client.m_aInputs[0];
+			Client.m_CurrentInput = 0;
+		}
+
+		m_PreviousDebugDummies = CurrentDebugDummies;
+		return;
+	}
+
 	for(int DummyIndex = 0; DummyIndex < maximum(m_PreviousDebugDummies, g_Config.m_DbgDummies); ++DummyIndex)
 	{
 		const bool AddDummy = !ForceDisconnect && DummyIndex < g_Config.m_DbgDummies;
