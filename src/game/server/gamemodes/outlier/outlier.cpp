@@ -24,6 +24,40 @@ constexpr int HIDE_PHASE_SECONDS = 10;
 constexpr int ACTIVE_PHASE_SECONDS = 60;
 constexpr int WIN_BROADCAST_SECONDS = 5;
 constexpr float PI_F = 3.14159265358979323846f;
+constexpr int s_aBotRandomEmoticons[] = {
+	EMOTICON_OOP,
+	EMOTICON_EXCLAMATION,
+	EMOTICON_HEARTS,
+	EMOTICON_DROP,
+	EMOTICON_DOTDOT,
+	EMOTICON_MUSIC,
+	EMOTICON_SORRY,
+	EMOTICON_GHOST,
+	EMOTICON_SUSHI,
+	EMOTICON_SPLATTEE,
+	EMOTICON_DEVILTEE,
+	EMOTICON_ZOMG,
+	EMOTICON_ZZZ,
+	EMOTICON_WTF,
+	EMOTICON_EYES,
+	EMOTICON_QUESTION};
+constexpr const char *const s_apRoundSkins[] = {
+	"bluekitty",
+	"bluestripe",
+	"brownbear",
+	"cammo",
+	"cammostripes",
+	"coala",
+	"default",
+	"limekitty",
+	"pinky",
+	"redbopp",
+	"redstripe",
+	"saddo",
+	"toptri",
+	"twinbop",
+	"twintri",
+	"warpaint"};
 
 float NormalizeAngle(float Angle)
 {
@@ -38,6 +72,18 @@ float RandomAngle()
 {
 	const int Milli = secure_rand_below(6284);
 	return -PI_F + Milli / 1000.0f;
+}
+
+const char *RandomRoundSkinName()
+{
+	return s_apRoundSkins[secure_rand_below((int)(sizeof(s_apRoundSkins) / sizeof(s_apRoundSkins[0])))];
+}
+
+CTeeInfo MakeRoundSkinInfo(const char *pSkinName, bool UseCustomColor, int ColorBody, int ColorFeet)
+{
+	CTeeInfo Info(pSkinName, UseCustomColor, ColorBody, ColorFeet);
+	Info.ToSixup();
+	return Info;
 }
 } // namespace
 
@@ -88,6 +134,10 @@ void CGameControllerOutlier::ResetRoundData()
 	m_aEliminated.fill(false);
 	m_aHammerUsedThisRound.fill(false);
 	m_aIdentityAppliedThisRound.fill(false);
+	m_aPendingBotPenaltyTick.fill(-1);
+	m_aPendingBotPenaltyVictim.fill(-1);
+	m_aLastRealTagHitTick.fill(-1);
+	m_aRoundSkinNames.fill(std::string());
 	m_aBotBehaviorInit.fill(false);
 }
 
@@ -103,6 +153,28 @@ void CGameControllerOutlier::OnRoundEnd()
 	GameServer()->SendBroadcast("", -1);
 	ReconnectClientsForRoundShuffle();
 	ResetRoundData();
+}
+
+bool CGameControllerOutlier::OnEntity(int Index, int x, int y, int Layer, int Flags, bool Initial, int Number)
+{
+	if(Initial && Index >= 1 && Index <= 3)
+		m_vSpawnTiles.emplace_back(x * 32.0f + 16.0f, y * 32.0f + 16.0f);
+
+	return CGameControllerBasePvp::OnEntity(Index, x, y, Layer, Flags, Initial, Number);
+}
+
+bool CGameControllerOutlier::CanSpawn(int Team, vec2 *pOutPos, int ClientId)
+{
+	if(Team == TEAM_SPECTATORS)
+		return false;
+
+	if(!m_vSpawnTiles.empty())
+	{
+		*pOutPos = m_vSpawnTiles[secure_rand_below((int)m_vSpawnTiles.size())];
+		return true;
+	}
+
+	return CGameControllerBasePvp::CanSpawn(Team, pOutPos, ClientId);
 }
 
 void CGameControllerOutlier::ReconnectClientsForRoundShuffle()
@@ -186,21 +258,8 @@ void CGameControllerOutlier::ApplyDefaultAppearance(int ClientId)
 	CPlayer *pPlayer = GameServer()->m_apPlayers[ClientId];
 	if(!pPlayer)
 		return;
-	static const char *const s_apDefaultParts[protocol7::NUM_SKINPARTS] = {
-		"standard",
-		"",
-		"",
-		"standard",
-		"standard",
-		"standard"};
-	static const int s_aNoCustomColors[protocol7::NUM_SKINPARTS] = {0, 0, 0, 0, 0, 0};
-	static const int s_aPartColors[protocol7::NUM_SKINPARTS] = {0, 0, 0, 0, 0, 0};
 
-	CTeeInfo ForcedInfo(s_apDefaultParts, s_aNoCustomColors, s_aPartColors);
-	str_copy(ForcedInfo.m_aSkinName, "default");
-	ForcedInfo.m_UseCustomColor = false;
-	ForcedInfo.m_ColorBody = 0;
-	ForcedInfo.m_ColorFeet = 0;
+	CTeeInfo ForcedInfo = MakeRoundSkinInfo(RoundSkinName(ClientId), false, 0, 0);
 
 	// Clamp both the current tee info and the managed user/override state,
 	// otherwise later refresh paths can reapply client-selected custom colors.
@@ -221,21 +280,7 @@ void CGameControllerOutlier::ApplyTaggerAppearance(int ClientId)
 	if(!pPlayer)
 		return;
 
-	static const char *const s_apTaggerParts[protocol7::NUM_SKINPARTS] = {
-		"standard",
-		"",
-		"",
-		"standard",
-		"standard",
-		"standard"};
-	static const int s_aUseCustomColors[protocol7::NUM_SKINPARTS] = {1, 1, 1, 1, 1, 1};
-	static const int s_aRedPartColors[protocol7::NUM_SKINPARTS] = {65387, 65387, 65387, 65387, 65387, 65387};
-
-	CTeeInfo TaggerInfo(s_apTaggerParts, s_aUseCustomColors, s_aRedPartColors);
-	str_copy(TaggerInfo.m_aSkinName, "default");
-	TaggerInfo.m_UseCustomColor = true;
-	TaggerInfo.m_ColorBody = 65387;
-	TaggerInfo.m_ColorFeet = 65387;
+	CTeeInfo TaggerInfo = MakeRoundSkinInfo(RoundSkinName(ClientId), true, 65387, 65387);
 
 	pPlayer->m_SkinInfoManager.SetUserChoice(TaggerInfo);
 	pPlayer->m_SkinInfoManager.SetUseCustomColor(ESkinPrio::HIGH, true);
@@ -244,10 +289,27 @@ void CGameControllerOutlier::ApplyTaggerAppearance(int ClientId)
 	for(bool &UseCustom : pPlayer->m_TeeInfos.m_aUseCustomColors)
 		UseCustom = true;
 	for(int &PartColor : pPlayer->m_TeeInfos.m_aSkinPartColors)
-		PartColor = 65387;
-	pPlayer->m_TeeInfos.m_ColorBody = 65387;
-	pPlayer->m_TeeInfos.m_ColorFeet = 65387;
+		PartColor = 65280;
+	pPlayer->m_TeeInfos.m_ColorBody = 65280;
+	pPlayer->m_TeeInfos.m_ColorFeet = 65280;
 	GameServer()->SendSkinChange7(ClientId);
+}
+
+void CGameControllerOutlier::ApplyTaggerLoadout(int ClientId)
+{
+	if(ClientId < 0 || ClientId >= MAX_CLIENTS)
+		return;
+	CPlayer *pPlayer = GameServer()->m_apPlayers[ClientId];
+	if(!pPlayer)
+		return;
+	CCharacter *pChr = pPlayer->GetCharacter();
+	if(!pChr || !pChr->IsAlive())
+		return;
+
+	pChr->SetWeaponGot(WEAPON_LASER, true);
+	pChr->SetWeaponAmmo(WEAPON_LASER, -1);
+	pChr->SetActiveWeapon(WEAPON_LASER);
+	pChr->SetLastWeapon(WEAPON_LASER);
 }
 
 void CGameControllerOutlier::ApplyRoleAppearance(int ClientId)
@@ -263,13 +325,51 @@ void CGameControllerOutlier::ApplyRoleAppearance(int ClientId)
 
 void CGameControllerOutlier::SpawnHammerSmoke(const vec2 &Pos)
 {
-	constexpr int NumParticles = 24;
-	constexpr float Radius = 4.0f * 32.0f;
-	for(int i = 0; i < NumParticles; i++)
+	constexpr int NumRingParticles = 24;
+	constexpr int NumInnerParticles = 32;
+	constexpr int NumWaves = 2;
+	constexpr float Radius = 6.0f * 32.0f;
+	for(int Wave = 0; Wave < NumWaves; Wave++)
 	{
-		const float Angle = (2.0f * PI_F * i) / NumParticles;
-		const vec2 Offset(cosf(Angle) * Radius, sinf(Angle) * Radius);
-		GameServer()->CreatePlayerSpawn(Pos + Offset);
+		const float WaveRadius = Radius * (Wave == 0 ? 0.75f : 1.0f);
+		for(int i = 0; i < NumRingParticles; i++)
+		{
+			const float Angle = (2.0f * PI_F * i) / NumRingParticles + (Wave * PI_F) / NumRingParticles;
+			const vec2 Offset(cosf(Angle) * WaveRadius, sinf(Angle) * WaveRadius);
+			GameServer()->CreatePlayerSpawn(Pos + Offset);
+		}
+
+		for(int i = 0; i < NumInnerParticles; i++)
+		{
+			const float Angle = -PI_F + (2.0f * PI_F * secure_rand_below(10000)) / 10000.0f;
+			const float Distance = WaveRadius * sqrtf(secure_rand_below(10000) / 10000.0f);
+			const vec2 Offset(cosf(Angle) * Distance, sinf(Angle) * Distance);
+			GameServer()->CreatePlayerSpawn(Pos + Offset);
+		}
+	}
+
+	const float RadiusSquared = Radius * Radius;
+	for(int ClientId = 0; ClientId < MAX_CLIENTS; ClientId++)
+	{
+		if(!Server()->ClientIngame(ClientId))
+			continue;
+		CPlayer *pPlayer = GameServer()->m_apPlayers[ClientId];
+		if(!pPlayer || pPlayer->GetTeam() == TEAM_SPECTATORS)
+			continue;
+		if(m_RolesAssigned && m_aRoles[ClientId] == ERole::TAGGER)
+			continue;
+
+		CCharacter *pChr = pPlayer->GetCharacter();
+		if(!pChr || !pChr->IsAlive())
+			continue;
+
+		const vec2 Delta = pChr->GetPos() - Pos;
+		const float DistanceSquared = Delta.x * Delta.x + Delta.y * Delta.y;
+		if(DistanceSquared > RadiusSquared)
+			continue;
+
+		m_aRoundSkinNames[ClientId] = RandomRoundSkinName();
+		ApplyRoleAppearance(ClientId);
 	}
 }
 
@@ -324,6 +424,8 @@ void CGameControllerOutlier::InitializeRound()
 	m_aIdentityAppliedThisRound.fill(false);
 	m_aBotBehaviorInit.fill(false);
 
+	AssignRoundSkins();
+
 	for(CPlayer *pPlayer : GameServer()->m_apPlayers)
 	{
 		if(!pPlayer)
@@ -338,6 +440,38 @@ void CGameControllerOutlier::InitializeRound()
 		}
 	}
 
+	for(CPlayer *pPlayer : GameServer()->m_apPlayers)
+	{
+		if(!pPlayer)
+			continue;
+		if(!Server()->ClientIngame(pPlayer->GetCid()))
+			continue;
+		ApplyRoleAppearance(pPlayer->GetCid());
+	}
+
+}
+
+void CGameControllerOutlier::AssignRoundSkins()
+{
+	for(int ClientId = 0; ClientId < MAX_CLIENTS; ClientId++)
+	{
+		if(!Server()->ClientIngame(ClientId))
+		{
+			m_aRoundSkinNames[ClientId].clear();
+			continue;
+		}
+
+		m_aRoundSkinNames[ClientId] = RandomRoundSkinName();
+	}
+}
+
+const char *CGameControllerOutlier::RoundSkinName(int ClientId)
+{
+	if(ClientId < 0 || ClientId >= MAX_CLIENTS)
+		return "default";
+	if(m_aRoundSkinNames[ClientId].empty())
+		m_aRoundSkinNames[ClientId] = RandomRoundSkinName();
+	return m_aRoundSkinNames[ClientId].c_str();
 }
 
 void CGameControllerOutlier::AssignRoles()
@@ -398,7 +532,11 @@ void CGameControllerOutlier::AssignRoles()
 		m_aRoles[vRealPlayers[i]] = ERole::TAGGER;
 
 	for(int ClientId : vRealPlayers)
+	{
 		ApplyRoleAppearance(ClientId);
+		if(m_aRoles[ClientId] == ERole::TAGGER)
+			ApplyTaggerLoadout(ClientId);
+	}
 
 	m_RolesAssigned = true;
 	m_ActivePhaseEndTick = Server()->Tick() + ACTIVE_PHASE_SECONDS * Server()->TickSpeed();
@@ -530,6 +668,11 @@ void CGameControllerOutlier::TickBotBehavior()
 		{
 			Bot.m_Direction = (int)secure_rand_below(3) - 1;
 			Bot.m_TargetAngle = RandomAngle();
+			if(secure_rand_below(100) < 10)
+			{
+				const int Emoticon = s_aBotRandomEmoticons[secure_rand_below((int)std::size(s_aBotRandomEmoticons))];
+				GameServer()->SendEmoticon(ClientId, Emoticon, -1);
+			}
 			if(secure_rand_below(100) < 18)
 			{
 				const int MaxHoldTicks = 5 * Server()->TickSpeed();
@@ -586,6 +729,39 @@ void CGameControllerOutlier::TickBotBehavior()
 	}
 }
 
+void CGameControllerOutlier::ResolvePendingBotPenalties()
+{
+	const int TickNow = Server()->Tick();
+	for(int ClientId = 0; ClientId < MAX_CLIENTS; ClientId++)
+	{
+		const int PenaltyTick = m_aPendingBotPenaltyTick[ClientId];
+		if(PenaltyTick < 0)
+			continue;
+		if(PenaltyTick >= TickNow)
+			continue;
+
+		const int VictimId = m_aPendingBotPenaltyVictim[ClientId];
+		const bool HitRealOnSameTick = m_aLastRealTagHitTick[ClientId] == PenaltyTick;
+		m_aPendingBotPenaltyTick[ClientId] = -1;
+		m_aPendingBotPenaltyVictim[ClientId] = -1;
+		if(HitRealOnSameTick)
+			continue;
+
+		if(!Server()->ClientIngame(ClientId))
+			continue;
+		if(m_aRoles[ClientId] != ERole::TAGGER)
+			continue;
+
+		CPlayer *pAttacker = GameServer()->m_apPlayers[ClientId];
+		CCharacter *pAttackerChr = pAttacker ? pAttacker->GetCharacter() : nullptr;
+		if(!pAttackerChr || !pAttackerChr->IsAlive())
+			continue;
+
+		pAttackerChr->Die(VictimId, WEAPON_GAME);
+		SendChatTarget(ClientId, "You tagged a bot.");
+	}
+}
+
 void CGameControllerOutlier::Tick()
 {
 	CGameControllerBasePvp::Tick();
@@ -605,6 +781,7 @@ void CGameControllerOutlier::Tick()
 
 	UpdateBotPopulation();
 	EnsureIdentityApplied();
+	ResolvePendingBotPenalties();
 	EnforceDefaultSkins();
 	BroadcastCountdown();
 
@@ -633,8 +810,13 @@ void CGameControllerOutlier::OnCharacterSpawn(CCharacter *pChr)
 	pChr->SetActiveWeapon(WEAPON_HAMMER);
 	pChr->SetLastWeapon(WEAPON_HAMMER);
 
-	if(pChr->GetPlayer())
-		ApplyDefaultAppearance(pChr->GetPlayer()->GetCid());
+	if(!pChr->GetPlayer())
+		return;
+
+	const int ClientId = pChr->GetPlayer()->GetCid();
+	ApplyDefaultAppearance(ClientId);
+	if(m_RolesAssigned && m_aRoles[ClientId] == ERole::TAGGER)
+		ApplyTaggerLoadout(ClientId);
 }
 
 void CGameControllerOutlier::OnPlayerConnect(CPlayer *pPlayer)
@@ -645,13 +827,23 @@ void CGameControllerOutlier::OnPlayerConnect(CPlayer *pPlayer)
 
 	const int ClientId = pPlayer->GetCid();
 	m_aIdentityAppliedThisRound[ClientId] = false;
+	m_aPendingBotPenaltyTick[ClientId] = -1;
+	m_aPendingBotPenaltyVictim[ClientId] = -1;
+	m_aLastRealTagHitTick[ClientId] = -1;
+	m_aRoundSkinNames[ClientId].clear();
 	m_aHasOriginalName[ClientId] = false;
 	m_aOriginalNames[ClientId].clear();
 	m_aHammerUsedThisRound[ClientId] = false;
 	pPlayer->SetInitialAfk(false);
 
 	Server()->SetClientClan(ClientId, "");
+	pPlayer->m_EyeEmoteEnabled = false;
+	pPlayer->OverrideDefaultEmote(EMOTE_NORMAL, Server()->Tick() + 60 * Server()->TickSpeed());
+	if(CCharacter *pChr = pPlayer->GetCharacter())
+		pChr->SetEmote(EMOTE_NORMAL, -1);
 	ApplyRoleAppearance(ClientId);
+	if(m_RolesAssigned && m_aRoles[ClientId] == ERole::TAGGER)
+		ApplyTaggerLoadout(ClientId);
 	RandomizeName(ClientId, IsDebugDummyClient(ClientId));
 	m_aIdentityAppliedThisRound[ClientId] = true;
 
@@ -685,6 +877,8 @@ bool CGameControllerOutlier::OnFireWeapon(CCharacter &Character, int &Weapon, ve
 
 	const int ClientId = pPlayer->GetCid();
 	if(ClientId < 0 || ClientId >= MAX_CLIENTS)
+		return false;
+	if(m_RolesAssigned && m_aRoles[ClientId] == ERole::TAGGER)
 		return false;
 
 	// Real players only get one hammer use per round; consuming happens on fire attempt, even on misses.
@@ -747,7 +941,7 @@ bool CGameControllerOutlier::OnCharacterTakeDamage(vec2 &Force, int &Dmg, int &F
 		return CGameControllerBasePvp::OnCharacterTakeDamage(Force, Dmg, From, Weapon, Character);
 
 	Dmg = 0;
-	if(Weapon != WEAPON_HAMMER)
+	if(Weapon != WEAPON_HAMMER && Weapon != WEAPON_LASER)
 		return true;
 	if(!m_RolesAssigned)
 		return true;
@@ -761,7 +955,7 @@ bool CGameControllerOutlier::OnCharacterTakeDamage(vec2 &Force, int &Dmg, int &F
 
 	if(m_RoundResolved)
 	{
-		Character.Die(From, WEAPON_HAMMER);
+		Character.Die(From, Weapon);
 		return true;
 	}
 
@@ -771,14 +965,15 @@ bool CGameControllerOutlier::OnCharacterTakeDamage(vec2 &Force, int &Dmg, int &F
 
 	if(m_aRoles[VictimId] == ERole::HIDER_FAKE)
 	{
-		pAttacker->GetCharacter()->Die(VictimId, WEAPON_HAMMER);
-		SendChatTarget(From, "You hammered a bot.");
+		m_aPendingBotPenaltyTick[From] = Server()->Tick();
+		m_aPendingBotPenaltyVictim[From] = VictimId;
 		return true;
 	}
 
 	if(m_aRoles[VictimId] == ERole::HIDER_REAL)
 	{
-		Character.Die(From, WEAPON_HAMMER);
+		m_aLastRealTagHitTick[From] = Server()->Tick();
+		Character.Die(From, Weapon);
 		return true;
 	}
 
@@ -792,6 +987,12 @@ bool CGameControllerOutlier::OnChatMessage(const CNetMsg_Cl_Say *pMsg, int Lengt
 
 	if(!pMsg || !pPlayer)
 		return false;
+
+	if(str_startswith_nocase(pMsg->m_pMessage, "/emote") || str_startswith_nocase(pMsg->m_pMessage, "/eyeemote"))
+	{
+		SendChatTarget(pPlayer->GetCid(), "Eye emotes are fixed in outlier.");
+		return true;
+	}
 
 	// Keep command/whisper behavior untouched.
 	if(pMsg->m_pMessage[0] == '/')

@@ -5,6 +5,7 @@
 
 #include <array>
 #include <string>
+#include <vector>
 
 class CGameControllerOutlier : public CGameControllerBasePvp
 {
@@ -15,6 +16,8 @@ public:
 	void Tick() override;
 	void OnRoundStart() override;
 	void OnRoundEnd() override;
+	bool OnEntity(int Index, int x, int y, int Layer, int Flags, bool Initial, int Number = 0) override;
+	bool CanSpawn(int Team, vec2 *pOutPos, int ClientId) override;
 	void OnCharacterSpawn(class CCharacter *pChr) override;
 	void OnPlayerConnect(class CPlayer *pPlayer) override;
 	bool OnFireWeapon(CCharacter &Character, int &Weapon, vec2 &Direction, vec2 &MouseTarget, vec2 &ProjStartPos) override;
@@ -62,24 +65,33 @@ private:
 	std::array<bool, MAX_CLIENTS> m_aEliminated{};
 	std::array<bool, MAX_CLIENTS> m_aHammerUsedThisRound{};
 	std::array<bool, MAX_CLIENTS> m_aIdentityAppliedThisRound{};
+	std::array<int, MAX_CLIENTS> m_aPendingBotPenaltyTick{};
+	std::array<int, MAX_CLIENTS> m_aPendingBotPenaltyVictim{};
+	std::array<int, MAX_CLIENTS> m_aLastRealTagHitTick{};
+	std::array<std::string, MAX_CLIENTS> m_aRoundSkinNames;
 	std::array<bool, MAX_CLIENTS> m_aHasOriginalName{};
 	std::array<std::string, MAX_CLIENTS> m_aOriginalNames;
 	std::array<SBotBehavior, MAX_CLIENTS> m_aBotBehavior{};
 	std::array<bool, MAX_CLIENTS> m_aBotBehaviorInit{};
+	std::vector<vec2> m_vSpawnTiles;
 
 	void ResetRoundData();
 	void InitializeRound();
+	void AssignRoundSkins();
 	void AssignRoles();
 	void BroadcastCountdown();
 	void ReconnectClientsForRoundShuffle();
 	void EnforceDefaultSkins();
 	void UpdateBotPopulation();
 	void TickBotBehavior();
+	void ResolvePendingBotPenalties();
 	void EnsureIdentityApplied();
 	bool IsDebugDummyClient(int ClientId) const;
 	void ApplyRoleAppearance(int ClientId);
 	void ApplyDefaultAppearance(int ClientId);
 	void ApplyTaggerAppearance(int ClientId);
+	void ApplyTaggerLoadout(int ClientId);
+	const char *RoundSkinName(int ClientId);
 	void SpawnHammerSmoke(const vec2 &Pos);
 	void RandomizeName(int ClientId, bool IsBot);
 	const char *ChatNameForClient(int ClientId) const;
